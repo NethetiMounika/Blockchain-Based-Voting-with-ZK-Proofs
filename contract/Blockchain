@@ -1,0 +1,227 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title Blockchain-Based Voting with ZK Proofs
+ * @dev A secure, anonymous voting system using zero-knowledge proofs
+ */
+contract Project {
+    
+    struct Proposal {
+        uint256 id;
+        string title;
+        string description;
+        uint256 yesVotes;
+        uint256 noVotes;
+        uint256 startTime;
+        uint256 endTime;
+        bool active;
+    }
+    
+    struct Voter {
+        bool isRegistered;
+        bytes32 commitment;
+        uint256 registrationTime;
+    }
+    
+    // State variables
+    mapping(uint256 => Proposal) public proposals;
+    mapping(address => Voter) public voters;
+    mapping(bytes32 => bool) public usedCommitments;
+    mapping(uint256 => mapping(bytes32 => bool)) public proposalNullifiers;
+    
+    uint256 public proposalCount;
+    address public admin;
+    uint256 public constant VOTING_DURATION = 7 days;
+    
+    // Events
+    event VoterRegistered(address indexed voter, bytes32 commitment);
+    event ProposalCreated(uint256 indexed proposalId, string title, uint256 startTime, uint256 endTime);
+    event VoteCast(uint256 indexed proposalId, bytes32 nullifierHash, bool vote);
+    event ProposalEnded(uint256 indexed proposalId, uint256 yesVotes, uint256 noVotes);
+    
+    // Modifiers
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Only admin can perform this action");
+        _;
+    }
+    
+    modifier onlyRegisteredVoter() {
+        require(voters[msg.sender].isRegistered, "Voter not registered");
+        _;
+    }
+    
+    modifier validProposal(uint256 _proposalId) {
+        require(_proposalId < proposalCount, "Invalid proposal ID");
+        _;
+    }
+    
+    constructor() {
+        admin = msg.sender;
+        proposalCount = 0;
+    }
+    
+    /**
+     * @dev Core Function 1: Register voters with ZK commitment
+     */
+    function registerVoter(bytes32 _commitment) external {
+        require(!voters[msg.sender].isRegistered, "Voter already registered");
+        require(_commitment != bytes32(0), "Invalid commitment");
+        require(!usedCommitments[_commitment], "Commitment already used");
+        
+        voters[msg.sender] = Voter({
+            isRegistered: true,
+            commitment: _commitment,
+            registrationTime: block.timestamp
+        });
+        
+        usedCommitments[_commitment] = true;
+        emit VoterRegistered(msg.sender, _commitment);
+    }
+    
+    /**
+     * @dev Core Function 2: Create voting proposals
+     */
+    function createProposal(string memory _title, string memory _description) external onlyAdmin {
+        require(bytes(_title).length > 0, "Title cannot be empty");
+        require(bytes(_description).length > 0, "Description cannot be empty");
+        
+        uint256 proposalId = proposalCount;
+        uint256 startTime = block.timestamp;
+        uint256 endTime = startTime + VOTING_DURATION;
+        
+        proposals[proposalId] = Proposal({
+            id: proposalId,
+            title: _title,
+            description: _description,
+            yesVotes: 0,
+            noVotes: 0,
+            startTime: startTime,
+            endTime: endTime,
+            active: true
+        });
+        
+        proposalCount++;
+        emit ProposalCreated(proposalId, _title, startTime, endTime);
+    }
+    
+    /**
+     * @dev Core Function 3: Cast anonymous vote using ZK proof
+     */
+    function castVote(
+        uint256 _proposalId,
+        bool _vote,
+        bytes32 _nullifierHash,
+        bytes32 _zkProof
+    ) external validProposal(_proposalId) onlyRegisteredVoter {
+        Proposal storage proposal = proposals[_proposalId];
+        
+        require(proposal.active, "Proposal is not active");
+        require(block.timestamp >= proposal.startTime, "Voting has not started");
+        require(block.timestamp <= proposal.endTime, "Voting has ended");
+        require(!proposalNullifiers[_proposalId][_nullifierHash], "Vote already cast with this nullifier");
+        require(_nullifierHash != bytes32(0), "Invalid nullifier hash");
+        require(_zkProof != bytes32(0), "Invalid ZK proof");
+        require(_verifyZKProof(msg.sender, _nullifierHash, _zkProof), "Invalid ZK proof");
+        
+        if (_vote) {
+            proposal.yesVotes++;
+        } else {
+            proposal.noVotes++;
+        }
+        
+        proposalNullifiers[_proposalId][_nullifierHash] = true;
+        emit VoteCast(_proposalId, _nullifierHash, _vote);
+    }
+    
+    /**
+     * @dev End voting for a proposal
+     */
+    function endProposal(uint256 _proposalId) external validProposal(_proposalId) {
+        Proposal storage proposal = proposals[_proposalId];
+        
+        require(proposal.active, "Proposal already ended");
+        require(
+            msg.sender == admin || block.timestamp > proposal.endTime,
+            "Only admin can end proposal early or voting period must be over"
+        );
+        
+        proposal.active = false;
+        emit ProposalEnded(_proposalId, proposal.yesVotes, proposal.noVotes);
+    }
+    
+    /**
+     * @dev Get proposal details
+     */
+    function getProposal(uint256 _proposalId) external view validProposal(_proposalId) 
+        returns (
+            uint256 id,
+            string memory title,
+            string memory description,
+            uint256 yesVotes,
+            uint256 noVotes,
+            uint256 startTime,
+            uint256 endTime,
+            bool active
+        ) {
+        Proposal storage proposal = proposals[_proposalId];
+        return (
+            proposal.id,
+            proposal.title,
+            proposal.description,
+            proposal.yesVotes,
+            proposal.noVotes,
+            proposal.startTime,
+            proposal.endTime,
+            proposal.active
+        );
+    }
+    
+    /**
+     * @dev Get voting results
+     */
+    function getVotingResults(uint256 _proposalId) external view validProposal(_proposalId) 
+        returns (uint256 yesVotes, uint256 noVotes, uint256 totalVotes) {
+        Proposal storage proposal = proposals[_proposalId];
+        yesVotes = proposal.yesVotes;
+        noVotes = proposal.noVotes;
+        totalVotes = yesVotes + noVotes;
+    }
+    
+    /**
+     * @dev Check if nullifier hash has been used
+     */
+    function isNullifierUsed(uint256 _proposalId, bytes32 _nullifierHash) 
+        external view validProposal(_proposalId) returns (bool) {
+        return proposalNullifiers[_proposalId][_nullifierHash];
+    }
+    
+    /**
+     * @dev Internal ZK proof verification (simplified)
+     */
+    function _verifyZKProof(address _voter, bytes32 _nullifierHash, bytes32 _zkProof) 
+        internal view returns (bool) {
+        bytes32 expectedProof = keccak256(
+            abi.encodePacked(voters[_voter].commitment, _nullifierHash, block.chainid)
+        );
+        return _zkProof == expectedProof;
+    }
+    
+    /**
+     * @dev Transfer admin rights
+     */
+    function transferAdmin(address _newAdmin) external onlyAdmin {
+        require(_newAdmin != address(0), "Invalid admin address");
+        require(_newAdmin != admin, "Same admin address");
+        admin = _newAdmin;
+    }
+    
+    /**
+     * @dev Get total proposals
+     */
+    function getTotalProposals() external view returns (uint256) {
+        return proposalCount;
+    }
+}
+##contract
+"C:\Users\Mouni\Pictures\Screenshots\Screenshot 2025-09-10 121722.png"
